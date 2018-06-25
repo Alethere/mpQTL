@@ -1,0 +1,768 @@
+---
+title: "Distances between individuals"
+output:
+  html_notebook: default
+  html_document: default
+---
+To evaluate relatedness between individuals we can use Identity By State (IBS) measures -if they are the same-, or Identity By Descent (IBD) -if they come from the same origin. The first can be evaluated with a distance measure that only takes into account state similarity such that the dosages are more similar following this order 0-1-2-3-4 (in a tetraploid). On the other hand, an IBD measure will calculate distances based on the probability that an allele comes from the same parent between two individuals. Theoretically, the IBD measure is a more consistent way of establishing genetic similarity between two individuals, but in practical terms, IBS measures are faster and more easy to obtain, and might be just as useful in the right situation. 
+  
+To this end we will use two distance measures: Euclidean distances for IBS and Hang's Maximum Likelihood polyploid coancestry implemented in the PolyRelatedness program. We will evaluate the relatedness between the last generation of ancestral groups and within the NAM populations.
+
+###Functions
+We will use a function to extract, from each ancestral population generated, the alleledosages individuals from the last generation.
+```{r, functions}
+getPop<-function( #get the last "number" individuals from an .alleledose file with multiple generations
+  file, #falleledose file to read
+  number=individuals, #number of individuals from the last generation to take. Will assume last generation if not specified
+  generations=50, #number of generations present
+  founders=10, #number of founders
+  individuals=100){ #number of individuals in each generation
+
+  if(number>individuals){stop("Selected individuals (number) is bigger than generation size (individuals)")}
+  pops<-data.table::fread(file,header=F, colClasses = c("integer",rep("NULL",founders+(generations-1)*individuals-number),rep("integer",number)))
+  return(pops)
+}
+
+handle<-function( #get a matrix, return a matrix (or vector if select=opposite) with specified cross data. Parents are excluded
+  matrix, #the numeric square matrix containing correlations
+  cross, #the cross number or range (what square you want to extract)
+  select=NULL, #a vector with "within", "between" or "opposite"
+  pnum=10, #the number of parents in the matrix (extra columns at the beggining)
+  off=50, #the number of childrenin the matrix (size of each square)
+  crossnum=9 #the number of crosses performed (number of squares)
+){
+  #define which columns/rows i want
+  start<-pnum+off*(cross-1)+1
+  end<-pnum+off*cross
+  #and make a vector with all of them
+  sel<-c()
+  for(i in 1:length(cross)){
+    sel<-c(sel,start[i]:end[i])
+  }
+  
+  #get all results within
+  with<-matrix(nrow=off,ncol=0)
+  for(i in 1:length(cross)){
+    with<-cbind(with,matrix[start[i]:end[i],start[i]:end[i]])
+  }
+  
+  #get all results between
+  bet<-matrix(nrow=off,ncol=0)
+  for(i in 1:length(cross)){
+    exclude<-sel[sel!=start[i]:end[i]]
+    bet<-cbind(bet,matrix[start[i]:end[i],exclude])
+  }
+  
+  #get all results of "opposite"
+  op1<-matrix[c(-1:-pnum,-sel),sel]
+  op2<-matrix[sel,c(-1:-pnum,-sel)]
+  
+  #put in result whatever is asked
+  result<-matrix(nrow=off,ncol=0)
+  if(any(select=="between")){
+    result<-cbind(result,bet)
+  }
+  if(any(select=="within")){
+    result<-cbind(result,with)
+  }
+  if(any(select=="opposite")){
+    result<-c(as.vector(result),as.vector(op1),as.vector(op2))
+  }
+  if(any(select=="op1")){
+    result<-c(as.vector(result),as.vector(op1))
+  }
+  if(any(select=="op2")){
+    result<-c(as.vector(result),as.vector(op2))
+  }
+  return(result)  
+}
+
+samplerows<-function( #generates a matrix with sampled evenly-spaced from the given matrix
+  matrix, #a matrix to sample
+  number=1000 #rows to obtain from that matrix
+  ){
+
+  step<-length(unlist(matrix[,1]))/number #defining the step that needs to be followed
+  samp<-round(seq(from=1,to=length(unlist(matrix[,1])),by=step)) #obtaining a sampling sequence
+  matrix<-matrix[samp,] #obtaining all columns that coincide with the sampling sequence
+  return(matrix)
+}
+
+compdist<-function(
+  list,
+  legend=NULL,
+  main=NULL,
+  xlab=NULL,
+  ylab=NULL,
+  ylim=c(0,0.13),
+  col=c("red","white","blue","green","yellow","orange","purple","brown","pink"),
+  position="topright"
+){
+  count<-1:length(list)
+  
+  low<-min(unlist(list),na.rm=T)
+  high<-max(unlist(list),na.rm=T)
+  breaks<-seq(low,high,by=(high-low)/100)
+  
+  if(is.null(main)){main<-"Comparison histogram"}
+  if(is.null(legend)){legend<-paste("Distribution",count)}
+
+  for(i in 1:length(list)){
+    if(i==1){add<-F}
+    h<-hist(unlist(list[[i]]),breaks=breaks,plot=F)
+    h$counts=h$counts/sum(h$counts)
+    plot(h,col=col[i],xlim=c(low,high),main=main,xlab=xlab,ylab=ylab,add=add,ylim=ylim)
+    add<-T
+  }
+  legend(position,legend,fill=col,box.lty=0)
+}
+
+toStamp<-function(
+  genotypes, #a table of alleledose type, with first column as marker names, each column allele count of SNP A
+  ploidy=4, #ploidy of all individuals. It is possible to specify a vector of ploidies
+  pop=1, #population of all individuals. It is possible to specify a vector of populations
+  format="freq" #the program also allows AB notation, but we will not use it.
+){
+  #First we need to turn the alleledose to frequencies, and take out the marker column
+  markers<-unlist(genotypes[,1])
+  genotypes<-as.matrix(t(genotypes[,-1]))/ploidy
+  colnames(genotypes)<-markers
+  
+  #then we create the vectors of ploidy and pop. Similar procedure could be done with format
+  if(length(ploidy)==1){ploidy<-rep(ploidy,nrow(genotypes))}
+  if(length(pop)==1){pop<-rep(pop,nrow(genotypes))}
+  
+  add<-data.frame(Ind=rownames(genotypes),
+                   Pop=pop,
+                   Ploidy=ploidy,
+                   Format=rep(format,nrow(genotypes)))
+  genotypes<-cbind(add,genotypes)
+  genotypes<-StAMPP::stamppConvert(genotypes,"r")
+}
+```
+
+###Euclidean distances
+We will start analyzing the *euclidean distances*, a measure of IBS, and then we'll follow up with the genetic distances. First, let's read our data. A good way to evaluate the distances, is through a heatmap, that let's us visualize the structure of the values within the matrix.
+```{r, pop_read, eval=F,echo=F}
+pops<-list()
+for(i in 1:10){
+  file<-paste0("PedigreeSIM/Parents/Pop_",i,"/","Pop_",i,"_alleledose.dat")
+  pops[[i]]<-getPop(file,number=100) #be careful column 1 is markers and row 1 is ind. names
+  pops[[i]]<-pops[[i]][-1,-1] #that's why we extract the first column and row
+}
+pops<-do.call(cbind,pops)#we join the data from all populations together
+dist.pops<-as.matrix(dist(t(pops)))#we need to transpose because it calculates distances between rows, not columns
+diag(dist.pops)<-NA #take out diagonal, which contains distance of individual to itself (0)
+write.table(dist.pops,file="Distances/Euclidean dist ancestral.txt",quote=F,row.names=F,col.names=F)
+
+```
+
+```{r,heatmap}
+dist.pops<-as.matrix(data.table::fread("Distances/Euclidean dist ancestral.txt",header=F)) #Read from previous file
+heatmap(dist.pops,Rowv=NA,Colv=NA,main="Euclidean distance heatmap",sym=T)#high relatedness means shorter (redder) distances.
+```
+We can see how there is a clear increase of relatedness within the ancestral groups (darker yellow squares). However, we are also interested in knowing if the difference between the ancestral groups is big enough that the distributions of distances do not overlap. For that we can use the function handle, which can extract the distances within and between crosses from distance matrices.  
+
+```{r, hist_dist}
+within.euc<-handle(dist.pops,cross=1:10,select="within",pnum=0,off=100,crossnum=10)
+bet.euc<-handle(dist.pops,cross=1:10,select="between",pnum=0,off=100,crossnum=10)
+
+diag(within.euc)<-NA #to take out distances=0 (distance ofindividual with itself)
+
+compdist(list(within.euc,bet.euc),legend=c("Within","Between"),xlab="Euclidean distance",main="Relatedness distribution")
+```
+We see how the two distributions are not overlapping, meaning that, indeed, there is enough euclidean distance between individuals to differentiate those that are from the same and from different populations.  
+
+We can follow the same procedure with the NAM populations to obtain the euclidean distances. However, this time we will have different types of NAM populations. We have 10 different levels of relatedness, but only analysing 1,3,7 and 10 will be enough to have an idea of how the relatedness matrices look. I simulated 100 NAM populations per cross type (1 to 10 ancestral groups in each type)
+
+```{r, eucdist_NAM, eval=F, echo=F}
+NAMpops<-list()
+ancestral<-c(1,3,7,10)
+for(i in ancestral){ #will get files from 1, 5 and 10 ancestral groups
+  for(j in 1:1){
+  filecount<-((i-1)*100+j) #index number of each cross (from 000 to 999)
+  listcount<-((i-1)*1+j) #index number in the NAMpops list
+  adress<-paste0("PedigreeSIM/NAM crosses/",i," ancestral/cross",sprintf("%03.f",filecount-1),"_alleledose.dat")
+  NAMpops[[listcount]]<-data.table::fread(adress,header=F)
+  NAMpops[[listcount]]<-NAMpops[[listcount]][-1,-1]
+  write.table(as.matrix(dist(t(NAMpops[[listcount]]))),paste("Distances/Euclidean",listcount,"ancestral.txt"),quote=F,row.names=F,col.names=F)
+  }
+}
+
+```
+
+```{r, read_eucNAM}
+ancestral<-c(1,3,7,10)
+NAM.euc<-list()
+for(i in ancestral){
+  NAM.euc[[i]]<-data.table::fread(paste("Distances/Euclidean",i,"ancestral.txt"))
+  diag(NAM.euc[[i]])<-NA
+  NAM.euc[[i]]<-as.matrix(NAM.euc[[i]])
+  heatmap(NAM.euc[[i]],Rowv=NA,Colv=NA,main=paste("NAM cross with",i," ancestral group(s)"),sym=T)
+}
+```
+
+We see how with 1 and 10 groups, there is only correlation within each of the 9 crosses (the darker central squares). However, in the NAM crosses with 3 or 7 groups, there is a higher correlation between the crosses that have parents from the same ancestral group. Let's look at the histograms of 1 and 10, and at the histograms of 3 and 7 separtely
+```{r, hist_dist_NAM}
+for(i in c(1,10)){
+  NAMwithin.euc<-handle(NAM.euc[[i]],cross=1:9,select="within")
+  diag(NAMwithin.euc)<-NA
+  NAMbet.euc<-handle(NAM.euc[[i]],cross=1:9,select="between")
+  
+  compdist(list(NAMwithin.euc,NAMbet.euc),main=paste("Distance distribution with",i,"ancestral group(s)"),xlab="Euclidean distance",legend=c("Within","Between"))
+
+}
+```
+We can see how the distances between crosses are a bit overlapping in the case where all parents come from the same ancestral group (60 to 96 within, 82 to 111 between). When 10 ancestral groups are present, the distributions are not overlapping (64 to 94 within, 96 to 117 between).  
+When looking at the distributions of 3 and 7 ancestral groups, we can distinguish distances within NAM crosses, between related crosses (peripheral parents share ancestral group) and between unrelated crosses (peripheral parents originate from different ancestral groups). 
+```{r, hist_relNAM}
+#Distances within
+NAMwithin.euc.3<-handle(NAM.euc[[3]],cross=1:9,select="within")
+diag(NAMwithin.euc.3)<-NA
+
+#First we extract the distances between with related crosses. With handle we can do that
+NAMbet.euc.r3<-as.vector(handle(NAM.euc[[3]],cross=1:2,select="between"))
+NAMbet.euc.r3<-c(NAMbet.euc.r3,handle(NAM.euc[[3]],cross=3:5,select="between"))
+NAMbet.euc.r3<-c(NAMbet.euc.r3,handle(NAM.euc[[3]],cross=6:9,select="between"))
+
+NAMbet.euc.u3<-as.vector(handle(NAM.euc[[3]],cross=1:2,select="opposite"))
+NAMbet.euc.u3<-c(NAMbet.euc.u3,handle(NAM.euc[[3]],cross=3:5,select="opposite"))
+NAMbet.euc.u3<-c(NAMbet.euc.u3,handle(NAM.euc[[3]],cross=6:9,select="opposite"))
+
+compdist(list(NAMwithin.euc.3,NAMbet.euc.r3,NAMbet.euc.u3),main=paste("Distance distribution with",3,"ancestral group(s)"),xlab="Euclidean distance",legend=c("Within","Related Between","Unrelated Between"))
+
+#Distances within
+NAMwithin.euc.7<-handle(NAM.euc[[7]],cross=1:9,select="within")
+diag(NAMwithin.euc.7)<-NA
+
+#First we extract the distances between with related crosses. With handle we can do that
+NAMbet.euc.r7<-as.vector(handle(NAM.euc[[7]],cross=2:3,select="between"))
+NAMbet.euc.r7<-c(NAMbet.euc.r7,handle(NAM.euc[[7]],cross=4:5,select="between"))
+NAMbet.euc.r7<-c(NAMbet.euc.r7,handle(NAM.euc[[7]],cross=7:8,select="between"))
+
+NAMbet.euc.u7<-as.vector(handle(NAM.euc[[7]],cross=2:3,select="opposite"))
+NAMbet.euc.u7<-c(NAMbet.euc.u7,handle(NAM.euc[[7]],cross=4:5,select="opposite"))
+NAMbet.euc.u7<-c(NAMbet.euc.u7,handle(NAM.euc[[7]],cross=7:8,select="opposite"))
+
+compdist(list(NAMwithin.euc.7,NAMbet.euc.r7,NAMbet.euc.u7),main=paste("Distance distribution with",7,"ancestral group(s)"),xlab="Euclidean distance",legend=c("Within","Related Between","Unrelated Between"))
+
+```
+We can observe how distance between unrelated crosses and within crosses is clearly different. Distances of related crosses are found in between the two distributions, overlapping more with the unrelated distances. This will affect our capability of estimating ancestral groups using euclidean distances, specially when there are few groups.
+
+###Genetic Distances
+The second measure that we can use is the genetic relatedness for polyploids defined by Hang _et. al_ (2016) and included in the PolyRelatedness program. This program has some limitations, particularly with big sets of data, be it population size or number of markers. It can also be very slow, so we will select a limited amount of genetic markers to speed up the calculations of relatedness. We will use some functions to interact with the program.
+```{r, polyrel_fun}
+getPop_polyRel<-function(#makes a dataframe with polyrel structure. Expects a dataframe obtained by getpop
+  genotypes, #getpop matrix (1 column and 1 row contain maker names and individual names)
+  populations=NULL #vector with population number for each individual. If not specified all will be 1
+  ){
+
+  genotypes<-t(genotypes)#because polyRel needs the data transposed
+  
+  #generate population vector if not specified
+  if(!is.vector(populations)){populations<-rep("1",(dim(genotypes)[1]-1))}
+  populations<-c("Pop",populations) #make it the right vector
+  
+  genotypes[1,1]<-"Ind" #change "marker" for "Ind"
+  genotypes <- cbind(genotypes[,1],populations,genotypes[,-1]) #put population vector as the second column
+  return(genotypes) 
+}
+
+dose_allele<-function( #Turns dosages into alleles (3 = 1110)
+  matrix#matrix with dosages
+  ){
+  dosages<-as.numeric(sort(unique(unlist(matrix[-1,-1])))) #vector with all possible dosages
+  max<-as.numeric(max(dosages)) #define the maximum
+  alleles<-paste0(strrep(0,max-dosages),strrep(1,dosages)) #vector with translations to alleles
+  
+  for(i in 1:length(dosages)){
+    matrix[matrix==dosages[i]]<-alleles[i]
+  }
+  return(matrix)
+}
+
+polyrelInput<-function( #function to make text files for polyrel
+  file, #file name or adress
+  genotype, #matrix with the genotype data
+  digits=1, #digits of the allele specification
+  outdigits=4, #number of decimals to be calculated for the distances
+  missing=8, #symbol for missing values
+  ambiguous=9, #symbol for ambyguous heterozygotes
+  nthreads=4, #number of threads assigned to the task
+  allelefreqs=NULL #table containing alle frequencies as needed by polyrel
+  ){
+ 
+  #write everything into a file
+  cat(c("//configuration
+//#alleledigits(1~4)\t#outputdigits(0~10)\t#missingallele\t#ambiguousallele\t#nthreads(1~64)\n",
+        paste(digits,outdigits,missing,ambiguous,nthreads,sep="\t")),file=file,sep="")
+  
+  if(!is.null(allelefreqs)){
+    cat("\n//allele frequency\n",file=file,append=T)
+    write.table(allelefreqs,file=file,append=T,quote=F,row.names=F,col.names=F,sep="\t")
+  }
+  
+  cat("//genotype\n",file=file,sep="",append=T)
+  write.table(genotype,file=file,append=T,quote=F,row.names=F,col.names=F,sep="\t")
+  cat("//end of file",file=file,append=T)
+}
+
+run.PolyRel <- function( #look at polyRelatedness documentation to know more about mode, fourth and fifht
+  input, #name of the file to be used as input
+  output=paste0("out_",input), #ame of the "out" file
+  mode="e", #mode of program
+  fourth=2, #fourth argument
+  fifth=0 #fifth argument
+  ){
+  #modes=i inbreeding, e relatedness, s simulation, n frequency of null alleles
+  #if e:
+  #fourth= estimator identifier (1=MOM Huang et al 2014, 2=ML Huang et al 2015, 3=Ritland 1996 estimator,
+  # 4=Loiselle et al. 1995 estimator, 5=Weir 1996 estimator, 6=Lynch & Ritland 1999, 7=Wang 2002, 8= Thomas 2010,
+  # 9=Thomas 2010 weighted by Wang 2002, 10=Li et al. 1993,11=Queller & Goodnight 1989,12=Huang 2016 A for diploid,
+  # 13=Huang 2016 B for diploid,14=Anderson & Weir 2007,15=Milligan 2003,16=Milligan 2003 for inbreeding)
+  #fifth= 0 for all individuals, 1 for within populations
+  #for the rest of specifications see Polyrelatedness manual.
+  
+  if(!any(c("i","e","s","n")==mode)){stop("Wrong mode specification: only i e s n allowed")}
+ 
+  #send the command to the cmd
+  ps <- system2(command = 'PolyRelatedness',
+                args = c(input,
+                         output,
+                         mode,
+                         fourth,
+                         fifth),
+                stdout = TRUE,
+                stderr = TRUE)
+  ?system2
+}
+
+allele_freq<-function(#generates a frequency table based on allele data (0001, or ABBA or 299299287292), can tolerate different lengths of alleles
+  matrix, #matrix or string containing individuals and their alleles
+  names=NULL, #optional vector of allele names, if not specified assumed to be first column of matrix
+  alength=1 #allele length
+){
+  if(is.null(names)){ #take names out of matrix
+    names<-matrix[,1]
+    matrix<-matrix[,-1]
+    print("First column assumed to contain marker names")
+  }
+  alleles<-data.frame(matrix(ncol=nrow(matrix)*2)) #create a dataframe for results. Each locus must have two columns and as many rows as alleles
+
+  row1<-c()
+  for(i in 1:length(unlist(matrix[,1]))){
+    expr<-paste0("(.{",alength,"})") #write the regex that will split the text
+    match<-gsub(expr, "\\1 ", matrix[i,]) #obtain text with spaces between chars
+    match<-stringr::str_c(match,collapse = "") #collapse all chars
+    match<-unlist(strsplit(match,split=" ")) #obtain a vector with all alleles present
+    n<-length(match)
+    variant<-unique(match)
+    for(j in 1:length(variant)){ #for each variant print the variant on first column and frequency on second
+      alleles[(j+1),i*2-1]<-variant[j] 
+      alleles[(j+1),i*2]<-length(which(match==variant[j]))/n
+    }
+    row1<-c(row1,names[i],round(length(variant))) #add the name and number of alleles at each column
+  }
+  alleles[1,]<-row1 #print all names
+  
+  return(alleles)
+}
+```
+Our first step will be to use the ancestral groups to generate the documents needed for PolyRelatedness.
+```{r, polyrel_read}
+pops<-list()
+for(i in 1:10){
+  file<-paste0("PedigreeSIM/Parents/Pop_",i,"/","Pop_",i,"_alleledose.dat")
+  pops[[i]]<-getPop(file,number=100) #be careful column 1 is markers and row 1 is ind. names
+  pops[[i]]<-pops[[i]][-1,-1] #that's why we extract the first column and row
+}
+
+polyrel<-list()
+for(i in 1:length(pops)){
+  polyrel[[i]]<-samplerows(pops[[i]],number = 1000)
+  polyrel[[i]]<-dose_allele(polyrel[[i]])
+  #We define a vector of Population that is only number (i), but it's needed for PolyRel. 
+  #Length is defined by number of individuals (polyrel[[i]][1,])
+  polyrel[[i]]<-getPop_polyRel(polyrel[[i]],populations = rep(i,length(unlist(polyrel[[i]][1,]))-1))
+  head<-polyrel[[i]][1,] #save the head containing the names of individuals
+  polyrel[[i]]<-polyrel[[i]][-1,] #take out the head of each data.frame so that we can rowbind the dfs later
+}
+
+polyrel<-do.call(rbind,polyrel)#we bind all df in the list
+polyrel<-rbind(head,polyrel)#we add the header to the beggining of the df, containing names of individuals
+
+polyrelInput(file="Distances/total_parents.txt",genotype=polyrel)
+```
+To prevent running the PolyRelatedness from running every time we knit the document, I put it in a non-evaluation file.
+```{r, polyrel_run, eval=F}
+#NOTE:With 1000 biallelic markers 1000 individuals takes about 2h
+run.PolyRel("total_parents.txt",output="total_distances.txt",fifth=0)
+file.rename("Distances/freq_em.txt","Distances/total_frequencies.txt")
+```
+```{r, heatmap_polyrel}
+#need to generate names for individuals because all are called G49_01 and things like that
+individuals<-c()
+for(i in 0:9){
+  individuals<-c(individuals,paste0("A",i,paste0("P",sprintf("%03.f",0:99))))
+}
+
+gendist<-read.table("Distances/total_distances.txt",skip=7,row.names = individuals,col.names=individuals)
+gendist<-as.matrix(gendist[,-1])#take out the marker names
+diag(gendist)<-NA
+
+heatmap(gendist,Colv=NA,Rowv=NA,main="Polyploid relatedness heatmap",sym=T)
+```
+We can see a similar heatmap as before. However, because now the measure is "coancestry" instead of "distance", the colors are inversed. The *r* coancestry estimator is 1 when individuals are identical by descent, and 0 if they are unrelated. We can take a look at the distributions of distances, just as we did before.
+```{r, hist_polyrel}
+within.gen<-handle(gendist,cross=1:10,select="within",pnum=0,off=100,crossnum=10)
+bet.gen<-handle(gendist,cross=1:10,select="between",pnum=0,off=100,crossnum=10)
+
+diag(within.gen)<-NA #to take out distances=0 (distance ofindividu al with itself)
+
+compdist(list(within.gen,bet.gen),main="Relatedness distribution",xlab="Coancestry",legend=c("Within","Between"),ylim=c(0,0.8),position="topright")
+```
+We can see how the distribution of distances is clearly split. Most observations between ancestral groups are very lowly related, meaning that many of the coancestry scores are very close to 0.  
+Our next step is to obtain the genetic distances for the NAM crosses, a task that might prove not as straight-forward as one would think. If we would run the analysis only with the data of the NAM cross in particular, because the parental alleles are much more frequent in the population, it will lower the estimated relatedness between individuals, as more frequent alleles are less likely to be IBD when they are IBS. Therefore, we would obtain underestimations of parent-offspring relatedness. To solve that, we can force the program to use specific frequencies. Because we have obtained previoulsy the frequencies of the ancestral groups, we can use them to estimate the relatedness.  
+```{r, files_NAM_polyrel}
+NAMpolyrel<-list()
+freqs<-read.table("Distances/tot_allele_freq.txt",skip=1,quote="")
+
+View(NAMpolyrel[[1]][-1,1:11])
+
+ancestral<-c(1,3,7,10)
+for(i in ancestral){ #will get files from 1, 5 and 10 ancestral groups
+  for(j in 1:1){
+  filecount<-((i-1)*100+j) #index number of each cross (from 000 to 999)
+  listcount<-((i-1)*1+j) #index number in the NAMpops list
+  adress<-paste0("PedigreeSIM/NAM_crosses/",i," ancestral/cross",sprintf("%03.f",filecount-1),"_alleledose.dat")
+  NAMpolyrel[[listcount]]<-data.table::fread(adress,header=F)
+  NAMpolyrel[[i]]<-samplerows(NAMpolyrel[[i]])
+  NAMpolyrel[[i]]<-dose_allele(NAMpolyrel[[i]])
+  #NAMpolyrel[[i]]<-getPop_polyRel(NAMpolyrel[[i]])
+  #file=paste0("Distances/NAM_",i,".txt")
+  #polyrelInput(file=file,genotype=NAMpolyrel[[i]],allelefreqs = freqs)
+  }
+}
+```
+Again, to prevent the polyrel from running every time the notebook is evaluated, let's put it in a different chunck.
+```{r, NAM_polyrel, eval=F}
+setwd("Distances/")
+for(i in ancestral){
+  file<-paste0("NAM_",i,".txt")
+  outfile<-paste0("NAM_",i,"out.txt")
+  run.PolyRel(file,output=outfile,fifth=0)
+}
+```
+```{r, heatmap_NAM_polyrel}
+file<-c(paste0("Distances/NAM_",ancestral,"out.txt"))
+NAM.gen<-list()
+for(i in 1:length(file)){
+  NAM.gen[[i]]<-data.table::fread(file[i],header=T)
+  NAM.gen[[i]]<-as.matrix(NAM.gen[[i]][,-1])
+  diag(NAM.gen[[i]])<-NA
+  heatmap(NAM.gen[[i]],Colv=NA,Rowv=NA,main=paste("Relatedness",ancestral[i],"ancestral(s)"))
+}
+```
+We can see how the heatmaps using the ML relatedness show similar structures (the colours are reversed, yellow means closely related, red means not related). Analyzing the distributions also gives us similar sets of spectra.
+
+```{r,histograms}
+namington<-c(1,NA,NA,10)
+for(i in c(1,4)){
+  NAMwithin.gen<-handle(NAM.gen[[i]],cross=1:9,select="within")
+  diag(NAMwithin.gen)<-NA
+  NAMbet.gen<-handle(NAM.gen[[i]],cross=1:9,select="between")
+  
+  compdist(list(NAMwithin.gen,NAMbet.gen),main=paste("Relatedness distribution with",namington[i],"ancestral group(s)"),xlab="ML relatedness",legend=c("Within","Between"))
+
+}
+
+#Distances within
+NAMwithin.gen.3<-handle(NAM.gen[[2]],cross=1:9,select="within")
+diag(NAMwithin.gen.3)<-NA
+
+#First we extract the distances between with related crosses. With handle we can do that
+NAMbet.gen.r3<-as.vector(handle(NAM.gen[[2]],cross=1:2,select="between"))
+NAMbet.gen.r3<-c(NAMbet.gen.r3,handle(NAM.gen[[2]],cross=3:5,select="between"))
+NAMbet.gen.r3<-c(NAMbet.gen.r3,handle(NAM.gen[[2]],cross=6:9,select="between"))
+
+NAMbet.gen.u3<-as.vector(handle(NAM.gen[[2]],cross=1:2,select="opposite"))
+NAMbet.gen.u3<-c(NAMbet.gen.u3,handle(NAM.gen[[2]],cross=3:5,select="opposite"))
+NAMbet.gen.u3<-c(NAMbet.gen.u3,handle(NAM.gen[[2]],cross=6:9,select="opposite"))
+
+compdist(list(NAMwithin.gen.3,NAMbet.gen.r3,NAMbet.gen.u3),main=paste("Distance distribution with",3,"ancestral group(s)"),xlab="ML relatedness",legend=c("Within","Related Between","Unrelated Between"))
+
+#Distances within
+NAMwithin.gen.7<-handle(NAM.gen[[3]],cross=1:9,select="within")
+diag(NAMwithin.gen.7)<-NA
+
+#First we extract the distances between with related crosses. With handle we can do that
+NAMbet.gen.r7<-as.vector(handle(NAM.gen[[3]],cross=2:3,select="between"))
+NAMbet.gen.r7<-c(NAMbet.gen.r7,handle(NAM.gen[[3]],cross=4:5,select="between"))
+NAMbet.gen.r7<-c(NAMbet.gen.r7,handle(NAM.gen[[3]],cross=7:8,select="between"))
+
+NAMbet.gen.u7<-as.vector(handle(NAM.gen[[3]],cross=2:3,select="opposite"))
+NAMbet.gen.u7<-c(NAMbet.gen.u7,handle(NAM.gen[[3]],cross=4:5,select="opposite"))
+NAMbet.gen.u7<-c(NAMbet.gen.u7,handle(NAM.gen[[3]],cross=7:8,select="opposite"))
+
+compdist(list(NAMwithin.gen.7,NAMbet.gen.r7,NAMbet.gen.u7),main=paste("Distance distribution with",7,"ancestral group(s)"),xlab="ML relatedness",legend=c("Within","Related Between","Unrelated Between"))
+```
+There is a clear peak in the 0.25 distributions of the "unrelated between". The reason for that is not clear.
+
+##Comparison Between Distances
+Finally, it is clear that both, Euclidean and Polyrelatedness distances are showing similar results. It would be interesting to see if both distances are equivalent.
+```{r, comparison_distances}
+plot(as.vector(bet.euc),as.vector(bet.gen),col=rgb(0,0,0,alpha=0.1),xlim=c(70,160),ylim=c(0,1),pch=19,
+     main="Euclidean vs. Genetic distance: Ancestrals",xlab="Euclidean distance",ylab="ML Polyploid Relatedness")
+points(as.vector(within.euc),as.vector(within.gen),col=rgb(1,0,0,alpha=0.01),pch=19)
+legend("topright",c("Within","Between"),fill=c("red","black"))
+
+j<-c(1,NA,NA,10)
+for(i in c(1,4)){
+  NAMwithin.gen<-handle(NAM.gen[[i]],cross=1:9,select="within")
+  NAMbet.gen<-handle(NAM.gen[[i]],cross=1:9,select="between")
+  
+  NAMwithin.euc<-handle(NAM.euc[[j[i]]],cross=1:9,select="within")
+  NAMbet.euc<-handle(NAM.euc[[j[i]]],cross=1:9,select="between")
+  
+  plot(as.vector(NAMbet.euc),as.vector(NAMbet.gen),col=rgb(0,0,0,alpha=0.01),xlim=c(70,160),ylim=c(0,1),pch=19,
+     main=paste0("Euclidean vs. Genetic distance: NAM ",namington[i]," anc"),xlab="Euclidean distance",ylab="ML Polyploid Relatedness")
+points(as.vector(NAMwithin.euc),as.vector(NAMwithin.gen),col=rgb(1,0,0,alpha=0.01),pch=19)
+legend("topright",c("Within","Between"),fill=c("red","black"))
+}
+
+plot(as.vector(NAMbet.euc.u3),as.vector(NAMbet.gen.u3),col=rgb(0,0,0,alpha=0.01),xlim=c(70,160),ylim=c(0,1),pch=19,
+    main=paste0("Euclidean vs. Genetic distance: NAM 3 anc"),xlab="Euclidean distance",ylab="ML Polyploid Relatedness")
+points(as.vector(NAMbet.euc.r3),as.vector(NAMbet.gen.r3),col=rgb(0,0,1,alpha=0.01),pch=19)
+points(as.vector(NAMwithin.euc.3),as.vector(NAMwithin.gen.3),col=rgb(1,0,0,alpha=0.01),pch=19)
+legend("topright",c("Within","Unrelated Between","Related Between"),fill=c("red","blue","black"))
+
+plot(as.vector(NAMbet.euc.u7),as.vector(NAMbet.gen.u7),col=rgb(0,0,0,alpha=0.01),xlim=c(70,160),ylim=c(0,1),pch=19,
+    main=paste0("Euclidean vs. Genetic distance: NAM 7 anc"),xlab="Euclidean distance",ylab="ML Polyploid Relatedness")
+points(as.vector(NAMbet.euc.r7),as.vector(NAMbet.gen.r7),col=rgb(0,0,1,alpha=0.01),pch=19)
+points(as.vector(NAMwithin.euc.7),as.vector(NAMwithin.gen.7),col=rgb(1,0,0,alpha=0.01),pch=19)
+legend("topright",c("Within","Unrelated Between","Related Between"),fill=c("red","blue","black"))
+```
+Let's talk about them as if comparing IBS (Euclidean) and IBD (Polyrelatedness). In all situations it seems that precision is better with increased relatedness than with reduced relatedness. Still, both distances seem equally useful. 
+```{r, NAM_polyrel_freq, eval=F}
+NAMpolyrel<-list()
+#freqs<-read.table("Distances/tot_allele_freq.txt",skip=1,quote="")
+
+ancestral<-c(1,3,7,10)
+for(i in ancestral){ #will get files from 1, 5 and 10 ancestral groups
+  for(j in 1:1){
+  filecount<-((i-1)*100+j) #index number of each cross (from 000 to 999)
+  listcount<-((i-1)*1+j) #index number in the NAMpops list
+  adress<-paste0("PedigreeSIM/NAM crosses/",i," ancestral/cross",sprintf("%03.f",filecount-1),"_alleledose.dat")
+  NAMpolyrel[[listcount]]<-data.table::fread(adress,header=F)
+  NAMpolyrel[[i]]<-samplerows(NAMpolyrel[[i]])
+  NAMpolyrel[[i]]<-dose_allele(NAMpolyrel[[i]])
+  freqs<-allele_freq(NAMpolyrel[[i]][-1,1:11])
+  NAMpolyrel[[i]]<-getPop_polyRel(NAMpolyrel[[i]])
+  file=paste0("Distances/NAM_",i,"_pfreq.txt")
+  polyrelInput(file=file,genotype=NAMpolyrel[[i]],allelefreqs = freqs)
+  }
+}
+
+setwd("Distances/")
+for(i in ancestral){
+  file<-paste0("NAM_",i,"_pfreq.txt")
+  outfile<-paste0("NAM_",i,"_pfreq_out.txt")
+  run.PolyRel(file,output=outfile,fifth=0)
+}
+```
+
+```{r, parental_poly}
+ancestral<-c(3,7,10)
+file<-c(paste0("Distances/NAM_",ancestral,"_pfreq_out.txt"))
+NAM.gen.p<-list()
+for(i in 1:length(file)){
+  NAM.gen.p[[i]]<-data.table::fread(file[i],header=T)
+  NAM.gen.p[[i]]<-as.matrix(NAM.gen.p[[i]][,-1])
+  diag(NAM.gen.p[[i]])<-NA
+  heatmap(NAM.gen.p[[i]],Colv=NA,Rowv=NA,main=paste("Relatedness",ancestral[i],"ancestral(s)"))
+}
+
+
+NAM_wgenp<-handle(NAM.gen.p[[3]],select="within",cross=1:9)
+NAM_bgenp<-handle(NAM.gen.p[[3]],select="between",cross=1:9)
+
+compdist(list(NAM_wgenp,NAM_bgenp),legend=c("Within","Between"),ylim=c(0,0.2),position = "topright",main="Comparison 10 ancestral")
+
+NAM_wgenp.3<-handle(NAM.gen.p[[1]],select="within",cross=1:9)
+
+NAM_bgenp.3u<-handle(NAM.gen.p[[1]],select="opposite",cross=1:2)
+NAM_bgenp.3u2<-c(handle(NAM.gen.p[[1]],select="opposite",cross=3:5))
+NAM_bgenp.3u3<-c(handle(NAM.gen.p[[1]],select="opposite",cross=6:9))
+
+NAM3_11<-handle(NAM.gen.p[[1]],select="op1",cross=6:9) #only op1 has values in this one
+NAM3_12<-handle(NAM.gen.p[[1]],select="op2",cross=6:9) 
+
+compdist(list(NAM3_11,NAM3_12))
+
+
+compdist(list(NAM_bgenp.3u,NAM_bgenp.3u2,NAM_bgenp.3u3),legend=c("1","2","3"))
+
+NAM_bgenp.3r<-handle(NAM.gen.p[[1]],select="between",cross=1:2)
+NAM_bgenp.3r<-c(NAM_bgenp.3r,handle(NAM.gen.p[[1]],select="between",cross=3:5))
+NAM_bgenp.3r<-c(NAM_bgenp.3r,handle(NAM.gen.p[[1]],select="between",cross=6:9))
+
+compdist(list(NAM_wgenp.3,NAM_bgenp.3r,NAM_bgenp.3u),legend=c("Within","Between Related","Between Unrelated"),position="topright",main="Comparison 3 ancestrals")
+```
+Here we are testing a last method, that can be very useful in the actual computations. The system by which it determines the distance is an adaption of a diploid method developed by Yang et. al (2010) in humans. However, by using intermediate genetic loads to characterize the polyploids, it is able to compare genetic distances between different ploidy individuals. An important note is that although the distances between individuals are, in relative terms, the same as with the PolyRelatedness program, the measures themselves are not the same. It does not represent a coancestry measure, but rather an arbitrary measure for which 0 is the average relatedness in that population. As we can see in the heatmaps and graphs, this does not affect the distance distribution and, therefore, it is still useful as a covariance matrix for a mixed model. Moreover, unlike in the polyRelatedness program, the self-distances, are not capped at 1 or homogeneous; they vary according to the level of consanguinity. 
+```{r, stamp}
+ancestral<-c(1,3,7,10)
+file<-paste0("PedigreeSIM/NAM crosses/",ancestral," ancestral/cross")
+file<-paste0(file,sprintf("%03.f",(ancestral-1)*100))
+file<-paste0(file,"_alleledose.dat")
+
+NAMstamp<-lapply(file,function(x){
+  x<-data.table::fread(x)
+  x<-toStamp(x)
+  x<-StAMPP::stamppGmatrix(x)
+  diag(x)<-NA
+  return(x)
+})
+
+for(i in NAMstamp){
+  heatmap(i,Colv=NA,Rowv=NA)
+}
+
+namington<-c(1,NA,NA,10)
+for(i in c(1,4)){
+  diag(NAMstamp[[i]])<-NA
+  stampin1<-handle(NAMstamp[[i]],cross=1:9,select="within")
+  stampout1<-handle(NAMstamp[[i]],cross=1:9,select="between")
+  compdist(list(stampin1,stampout1),main=paste("Relatedness distribution with",namington[i],"ancestral group(s)"),xlab="StAMPP Gmatrix",legend=c("Within","Between"))
+}
+
+#Distances within
+NAMwithin.stamp.3<-handle(NAMstamp[[2]],cross=1:9,select="within")
+diag(NAMwithin.stamp.3)<-NA
+
+#First we extract the distances between with related crosses. With handle we can do that
+NAMbet.stamp.r3<-as.vector(handle(NAMstamp[[2]],cross=1:2,select="between"))
+NAMbet.stamp.r3<-c(NAMbet.stamp.r3,handle(NAMstamp[[2]],cross=3:5,select="between"))
+NAMbet.stamp.r3<-c(NAMbet.stamp.r3,handle(NAMstamp[[2]],cross=6:9,select="between"))
+
+NAMbet.stamp.u3<-as.vector(handle(NAMstamp[[2]],cross=1:2,select="opposite"))
+NAMbet.stamp.u3<-c(NAMbet.stamp.u3,handle(NAMstamp[[2]],cross=3:5,select="opposite"))
+NAMbet.stamp.u3<-c(NAMbet.stamp.u3,handle(NAMstamp[[2]],cross=6:9,select="opposite"))
+
+compdist(list(NAMwithin.stamp.3,NAMbet.stamp.r3,NAMbet.stamp.u3),main=paste("Distance distribution with",3,"ancestral group(s)"),xlab="StAMPP Gmatrix",legend=c("Within","Related Between","Unrelated Between"))
+
+#Distances within
+NAMwithin.stamp.7<-handle(NAMstamp[[3]],cross=1:9,select="within")
+diag(NAMwithin.stamp.7)<-NA
+
+#First we extract the distances between with related crosses. With handle we can do that
+NAMbet.stamp.r7<-as.vector(handle(NAMstamp[[3]],cross=2:3,select="between"))
+NAMbet.stamp.r7<-c(NAMbet.stamp.r7,handle(NAMstamp[[3]],cross=4:5,select="between"))
+NAMbet.stamp.r7<-c(NAMbet.stamp.r7,handle(NAMstamp[[3]],cross=7:8,select="between"))
+
+NAMbet.stamp.u7<-as.vector(handle(NAMstamp[[3]],cross=2:3,select="opposite"))
+NAMbet.stamp.u7<-c(NAMbet.stamp.u7,handle(NAMstamp[[3]],cross=4:5,select="opposite"))
+NAMbet.stamp.u7<-c(NAMbet.stamp.u7,handle(NAMstamp[[3]],cross=7:8,select="opposite"))
+
+compdist(list(NAMwithin.stamp.7,NAMbet.stamp.r7,NAMbet.stamp.u7),main=paste("Distance distribution with",7,"ancestral group(s)"),xlab="StAMPP Gmatrix",legend=c("Within","Related Between","Unrelated Between"))
+
+```
+
+```{r, STAMPP}
+ancestral<-c(1,3,7,10)
+file<-paste0("PedigreeSIM/NAM_crosses/",ancestral,"_ancestral/cross")
+file<-paste0(file,sprintf("%03.f",(ancestral-1)*100))
+file<-paste0(file,"_alleledose.dat")
+
+NAMstamp<-lapply(file,function(x){
+  x<-data.table::fread(x)
+  x<-toStamp(x)
+  x<-StAMPP::stamppGmatrix(x)
+  diag(x)<-NA
+  return(x)
+})
+
+
+for(i in NAMstamp){
+  heatmap(i,Colv=NA,Rowv=NA)
+}
+
+namington<-c(1,NA,NA,10)
+for(i in c(1,4)){
+  diag(NAMstamp[[i]])<-NA
+  stampin1<-handle(NAMstamp[[i]],cross=1:9,select="within")
+  stampout1<-handle(NAMstamp[[i]],cross=1:9,select="between")
+  compdist(list(stampin1,stampout1),main=paste("Relatedness distribution with",namington[i],"ancestral group(s)"),xlab="StAMPP Gmatrix",legend=c("Within","Between"))
+}
+
+#Distances within
+NAMwithin.stamp.3<-handle(NAMstamp[[2]],cross=1:9,select="within")
+diag(NAMwithin.stamp.3)<-NA
+
+#First we extract the distances between with related crosses. With handle we can do that
+NAMbet.stamp.r3<-as.vector(handle(NAMstamp[[2]],cross=1:2,select="between"))
+NAMbet.stamp.r3<-c(NAMbet.stamp.r3,handle(NAMstamp[[2]],cross=3:5,select="between"))
+NAMbet.stamp.r3<-c(NAMbet.stamp.r3,handle(NAMstamp[[2]],cross=6:9,select="between"))
+
+NAMbet.stamp.u3<-as.vector(handle(NAMstamp[[2]],cross=1:2,select="opposite"))
+NAMbet.stamp.u3<-c(NAMbet.stamp.u3,handle(NAMstamp[[2]],cross=3:5,select="opposite"))
+NAMbet.stamp.u3<-c(NAMbet.stamp.u3,handle(NAMstamp[[2]],cross=6:9,select="opposite"))
+
+compdist(list(NAMwithin.stamp.3,NAMbet.stamp.r3,NAMbet.stamp.u3),main=paste("Distance distribution with",3,"ancestral group(s)"),xlab="StAMPP Gmatrix",legend=c("Within","Related Between","Unrelated Between"))
+
+#Distances within
+NAMwithin.stamp.7<-handle(NAMstamp[[3]],cross=1:9,select="within")
+diag(NAMwithin.stamp.7)<-NA
+
+#First we extract the distances between with related crosses. With handle we can do that
+NAMbet.stamp.r7<-as.vector(handle(NAMstamp[[3]],cross=2:3,select="between"))
+NAMbet.stamp.r7<-c(NAMbet.stamp.r7,handle(NAMstamp[[3]],cross=4:5,select="between"))
+NAMbet.stamp.r7<-c(NAMbet.stamp.r7,handle(NAMstamp[[3]],cross=7:8,select="between"))
+
+NAMbet.stamp.u7<-as.vector(handle(NAMstamp[[3]],cross=2:3,select="opposite"))
+NAMbet.stamp.u7<-c(NAMbet.stamp.u7,handle(NAMstamp[[3]],cross=4:5,select="opposite"))
+NAMbet.stamp.u7<-c(NAMbet.stamp.u7,handle(NAMstamp[[3]],cross=7:8,select="opposite"))
+
+compdist(list(NAMwithin.stamp.7,NAMbet.stamp.r7,NAMbet.stamp.u7),main=paste("Distance distribution with",7,"ancestral group(s)"),xlab="StAMPP Gmatrix",legend=c("Within","Related Between","Unrelated Between"))
+```
+
+```{r}
+source("mpQTL_fun.R")
+map<-data.table::fread("PedigreeSIM/Potato.map")
+main<-c("NAM1","NAM3","NAM7","NAM10")
+names(main)<-file
+NAM<-lapply(file,function(NAM){
+  mat<-data.table::fread(NAM)
+  mat<-sample.cM(mat,map=map)
+  dist<-calc.K(t(mat[,-1]))
+  diag(dist)<-NA
+  png(paste0("Storage/Plots/Distances/Heatmap_",main[NAM],".png"),
+      height = 1000,width = 1200)
+  heatmap(dist,Colv=NA,Rowv=NA,main=main[NAM],
+          labRow ="",
+          labCol ="")
+  dev.off()
+  return(dist)
+})
+
+
+within<-handle(NAM[[2]],select="within",cross=1:9)
+
+#First we extract the distances between with related crosses. With handle we can do that
+rel.bet<-as.vector(handle(NAM[[2]],cross=1:2,select="between"))
+rel.bet<-c(rel.bet,handle(NAM[[2]],cross=3:5,select="between"))
+rel.bet<-c(rel.bet,handle(NAM[[2]],cross=6:9,select="between"))
+
+un.bet<-as.vector(handle(NAM[[2]],cross=1:2,select="opposite"))
+un.bet<-c(un.bet,handle(NAM[[2]],cross=3:5,select="opposite"))
+un.bet<-c(un.bet,handle(NAM[[2]],cross=6:9,select="opposite"))
+
+png("Storage/Plots/Distances/Histogram_NAM3.png",height = 600,width=800,res=100)
+compdist(list(within,rel.bet,un.bet),main=paste("Distance distribution with",3,"ancestral group(s)"),xlab="Realized Relationship",legend=c("Within","Related Between","Unrelated Between"),col=c("yellow","gold2","darkorange2"))
+dev.off()
+
+density(NAM[[2]],na.rm=T)
+```
+
+
+
+

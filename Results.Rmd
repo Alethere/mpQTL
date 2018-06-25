@@ -1,0 +1,451 @@
+---
+title: "Result Analysis"
+---
+
+First, we will clean the results so that we can have everything better organized. 
+These are the results of the multiQTL experiment, with different models. These were obtained
+without the Q models. 
+
+```{r,eval=F}
+files<-rep(paste0("Storage/ Multi_",c("LM","MM")),each=3)
+files<-paste0(files,"_",c("biallelic","ancestral","parental")," .RDS")
+names<-c("mLB","mLA","mLP","mMB","mMA","mMP")
+
+for(i in 1:length(files)){#with this loop we create a file with all QTLs for each situation
+  res<-readRDS(files[i])
+  res1<-lapply(res,function(x) x[[1]])
+  
+  if(any(names[i]==c("mMB","mMA","mMP"))){
+    res1<-lapply(res1,t)
+  }
+  
+  #extract each of the heratibility experiment values
+  res02<-sapply(res1,function(x) x[1,])
+  res05<-sapply(res1,function(x) x[2,])
+  res08<-sapply(res1,function(x) x[3,])
+  colnames(res02)<-names(res)
+  colnames(res05)<-names(res)
+  colnames(res08)<-names(res)
+  
+  #with this we create a variable for each experiment
+  assign(names[i],list(h02=res02,h05=res05,h08=res08))
+}
+
+h02<-lapply(list(mLB,mLA,mLP,mMB,mMA,mMP),function(x) x[[1]])
+h05<-lapply(list(mLB,mLA,mLP,mMB,mMA,mMP),function(x) x[[2]])
+h08<-lapply(list(mLB,mLA,mLP,mMB,mMA,mMP),function(x) x[[3]])
+
+names(h02)<-names
+names(h05)<-names
+names(h08)<-names
+
+Exp2<-list(h02,h05,h08)
+names(Exp2)<-c("h02","h05","h08")
+saveRDS(Exp2,"Storage/Experiment2.RDS")
+
+rm("mLB","mLA","mLP","mMB","mMA","mMP","h02","h05","h08")
+```
+
+Here, the processed outcome is used to generate comparison plots. The study of these p-values led to the conclusion that there was some issues with linear model p-value calculation. Which lead to experiments 3 and 4 (repeats of experiment 2 and 1 respectively)
+```{r}
+source("mpQTL_fun.R")
+Exp2<-readRDS("Storage/Experiment2.RDS")
+a<-7e-5 #LiJi correction yields systematically around this value
+
+#we obtain with this the object pos, which contains the absolute position, in cM, for each marker
+map<-data.table::fread("PedigreeSIM/Potato.map")
+cumchrom<-cumsum(sapply(unique(map$chromosome),function(x)
+  max(map$position[which(map$chromosome==x)])))
+cumchrom<-c(0,cumchrom)
+pos<-map$position+cumchrom[map$chromosome]
+rm(cumchrom,map)
+
+#With this we generate the plots for Experiment 2
+limits<-list(NAM3=1:25,NAM7=26:50,NAM10=51:75)
+QTLs<-list(NAM3=c(6906,3122,930),
+           NAM7=c(6906,3122,930,60,5727,3884,1794),
+           NAM10=c(6906,3122,930,60,5727,3884,1794,6492,5239,4856))
+
+herits<-names(Exp2) #the names of heritabilities
+models<-names(Exp2[[1]]) #the names of the models
+ancs<-names(limits) #the names of the ancestral groups
+
+### Model comparison plots ###
+for(i in 1:length(Exp2)){#each of the different heritabilities
+  h2<-herits[i]
+  
+  for(j in 1:length(limits)){# for each NAM pop
+    anc<-ancs[j]
+    QTL<-QTLs[[j]]
+    
+    png(paste0(paste0("Storage/Plots/",anc,"_",h2,"BIG.png")),width=2000,height=1200)
+    comp.skyplot(Exp2[[i]],pos,
+                 index=limits[[j]],QTLs=pos[QTLs[[j]]],
+                 main=paste0("Model comparison ",h2," ",anc),
+                 c=80,h=c(140,250),coltype = "divergent")
+    dev.off()
+    
+    png(paste0(paste0("Storage/Plots/","Mixed",anc,"_",h2,".png")),width=1000,height=600)
+    comp.skyplot(Exp2[[i]][4:6],pos,
+                 index=limits[[j]],QTLs=pos[QTLs[[j]]],
+                 main=paste0("Mixed model comparison ",h2," ",anc),
+                 c=80,h=c(250),coltype = "sequential")
+    dev.off()
+    
+    png(paste0(paste0("Storage/Plots/","Linear",anc,"_",h2,".png")),width=1000,height=600)
+    comp.skyplot(Exp2[[i]][1:3],pos,
+                 index=limits[[j]],QTLs=pos[QTLs[[j]]],
+                 main=paste0("Linear model comparison ",h2," ",anc),
+                 c=80,h=c(140),coltype = "sequential")
+    dev.off()
+
+  }
+  
+}
+
+### Single model plots ###
+for(i in 1:length(Exp2)){#each of the different heritabilities
+  h2<-herits[i]
+  
+  for(j in 1:length(limits)){# for each NAM pop
+    anc<-ancs[j]
+    QTL<-QTLs[[j]]
+    
+    png(paste0(paste0("Storage/Plots/",anc,"_",h2,".png")),width=1000,height=600)
+    comp.skyplot(Exp2[[i]],pos,index=limits[[j]],QTLs=pos[QTLs[[j]]],main=paste0("Model comparison ",h2))
+    dev.off()
+    
+    for(k in 1:length(Exp2[[i]])){# for each model
+      mod<-models[k]
+      result<-Exp2[[i]][[k]][,limits[[j]]]
+      plotname<-paste0("Storage/Plots/",anc,"_",h2,"_",mod)
+      name<-paste(anc,h2,mod)
+      
+      #QTL cummulative plot
+      png(paste0(plotname,"_skyline.png"),width=1200,height=800,antialias = 50)
+      colplotQTL(result,pos,alpha=a,main=paste0(name," QTL plot"),
+                 QTLs=pos[QTL])
+      dev.off()
+      
+      #Superposition of QQplots
+      png(paste0(plotname,"_superQQ.png"),width = 800,height = 800)
+      colQQplot(result,main=paste(name,"all QQ-plots"))
+      dev.off()
+      
+      #QQplots 
+      png(paste0(plotname,"_QQplot.png"),width = 800,height = 800)
+      ggd.qqplot(result,main=paste(name,"total QQ-plot"))
+      dev.off()
+      
+      #pvalue histogram
+      png(paste0(plotname,"_pvalhist.png"),width = 800, height = 800)
+      hist(result,main=paste(name,"pvalue histogram"))
+      dev.off()
+    }    
+
+  }
+  
+}
+
+```
+
+By calculating LiJi threshold values for the different NAMs, we saw that all thresholds were around 7.8e-5. The computation can take a long time, as a full marker correlation matrix must be calculated.
+```{r}
+#Calculate the threshold for each experiment
+dosfiles<-paste0("PedigreeSIM/NAM_crosses/",c("1_","3_","7_","10_"),
+                "ancestral/")
+dosfiles<-paste0(dosfiles,"cross",sprintf("%03.f",c(0,200,600,900)))
+dosfiles<-paste0(dosfiles,"_alleledose.dat")
+map<-data.table::fread("PedigreeSIM/Potato.map")
+
+
+alpha<-sapply(dosfiles,function(file){
+  
+  dosage<-data.table::fread(file,header=T)
+  dosage<-as.matrix(dosage[,-1])
+  segregants<-apply(dosage,1,function(x) length(unique(x))!=1)
+  
+  a<-LiJi(dosage[segregants,],0.05)
+  return(a)
+})
+
+
+
+cor(t(dosage))
+```
+
+More results for experiment 2
+```{r}
+
+for(i in 1:length(herits)){#each of the different heritabilities
+  h2<-herits[i]
+  
+  for(j in 3){# for each NAM pop
+    anc<-ancs[j]
+    QTL<-QTLs[[j]]
+    
+    bmp(paste0(paste0("Storage/Plots/",anc,"_",h2,".bmp")),width=800,height=600,res=115)
+    comp.skyplot(lapply(Exp2[[i]][4:6],function(x) x[-6910:-6890,])
+                 ,pos[-6910:-6890],
+                 index=limits[[j]], threshold=7e-100,
+                 main=paste0("Mixed model comparison ",h2," ",anc),
+                 c=80,h=c(250),coltype = "sequential",min=F)
+    dev.off()
+
+  }
+}
+
+```
+
+to obtain the "pheno" objects that are used in these plots, the phenotyping function must be run manually, a pheno object is included in the function, which contains genetic effects for each locus and allows to better identify genetic effects.
+```{r}
+  png("Storage/Plots/NAM3_Geneffect.png",width =600,height=500)
+  plot(c(rep(0,10),rep(1:9,each=50))+rnorm(460,sd=0.05),rowSums(pheno),
+       main="Genetic components NAM3",xlab="Cross",ylab="Genetic effect",
+       ylim=c(0,1.5))
+  abline(v=c(0.5,2.5,5.5))
+  text(c(0,1.5,4,7.5),rep(1.5,4),c("parents","A1xA1","A1xA2","A1xA3"))
+  dev.off()
+  
+  png("Storage/Plots/NAM3_Total.png",width =600,height=500)
+  plot(c(rep(0,10),rep(1:9,each=50))+rnorm(460,sd=0.05),result,
+       main="Phenotypes NAM3",xlab="Cross",ylab="Phenotype",
+       ylim=c(min(result),max(result)+1))
+  abline(v=c(0.5,2.5,5.5))
+  text(c(0,1.5,4,7.5),rep(max(result)+1,4),c("parents","A1xA1","A1xA2","A1xA3"))
+  dev.off()
+  
+  data<-data.frame(pop=c(rep("parent",10),rep(1:9,each=50)),pheno=result)
+  boxes<-list(data$pheno[which(data$pop%in%c(1,2))],
+         data$pheno[which(data$pop%in%c(3,4,5))],
+         data$pheno[which(data$pop%in%c(6,7,8,9))])
+ 
+  png("Storage/Plots/NAM3_Ancestral_cross.png",width=600,height=500)
+  names(boxes)<-c("A1xA1","A1xA2","A1xA3")
+  boxplot(boxes,main="Boxplot of ancestral crosses",xlab="Cross",ylab="Phenotype")
+  dev.off()
+  
+  png("Storage/Plots/NAM3_Boxplot_cross.png",width=600,height=500)
+  boxplot(pheno~pop,data=data,main="Boxplot NAM3 per cross",
+          xlab="Cross",ylab="Phenotype")
+  abline(v=c(2.5,5.5,9.5))
+  text(c(1.5,4,7.5),rep(66,4),c("A1xA1","A1xA2","A1xA3"))
+  dev.off()
+  
+
+  
+  data<-data$pop[order(result)]
+  ##### NAM10
+  
+    png("Storage/Plots/NAM10_Geneffect.png",width =600,height=500)
+  plot(c(rep(0,10),rep(1:9,each=50))+rnorm(460,sd=0.05),rowSums(pheno),
+       main="Genetic components NAM10",xlab="Cross",ylab="Genetic effect",
+       ylim=c(0,max(rowSums(pheno))+2))
+  abline(v=c(0.5:8.5))
+  text(c(0:10),rep(40,10),c("parents",paste0("A0xA",1:9)))
+  dev.off()
+  
+  png("Storage/Plots/NAM10_Total.png",width =600,height=500)
+  plot(c(rep(0,10),rep(1:9,each=50))+rnorm(460,sd=0.05),result,
+       main="Phenotypes NAM10",xlab="Cross",ylab="Phenotype",
+       ylim=c(min(result),max(result)+1))
+  abline(v=c(0.5:8.5))
+  text(c(0:10),rep(69.7,10),c("parents",paste0("A0xA",1:9)))
+  dev.off()
+  
+  data<-data.frame(pop=c(rep("parent",10),rep(1:9,each=50)),pheno=result)
+  boxes<-sapply(unique(data$pop),function(x) data$pheno[which(data$pop==x)])
+  names(boxes)<-c("parents",paste0("A0xA",1:9))
+    
+  png("Storage/Plots/NAM10_Ancestral_cross.png",width=800,height=650)
+  boxplot(boxes,main="Boxplot of ancestral crosses",xlab="Cross",ylab="Phenotype")
+  dev.off()
+  
+  png("Storage/Plots/NAM10_Boxplot_cross.png",width=600,height=500)
+  boxplot(pheno~pop,data=data,main="Boxplot NAM10 per cross",
+          xlab="Cross",ylab="Phenotype")
+  dev.off()
+  
+  
+  
+    
+  color<-colorspace::sequential_hcl(460)
+  color<-colorRampPalette(c("red","blue"))
+  
+  pcoplot<-data.frame(pheno=sort(result),Q[order(result),])
+  
+  png("Storage/Plots/NAM10_PCOplot.png")
+  plot(pcoplot[,2],pcoplot[,3],col=color(460),main="PCO NAM10",pch=19)
+  dev.off()
+
+```
+
+The results ofexperiment three (NAM3 and NAM10 multiallelism) are processed here
+```{r,Experiment_3}
+Exp3<-readRDS("Storage/Exp3.RDS")
+
+mod<-c("ancestral","biallelic","parental")
+div<-list("NAM3 h02"=seq(1,15,3),
+          "NAM3 h05"=seq(2,15,3),
+          "NAM3 h08"=seq(3,15,3),
+          "NAM10 h02"=seq(31,45,3),
+          "NAM10 h05"=seq(32,45,3),
+          "NAM10 h08"=seq(31,45,3))
+QT<-c(1,1,1,3,3,3)
+for(pop in 1:length(div)){
+  for(model in 1:3){
+    png(paste0("Storage/Plots/MultiQTL/",names(div)[pop],"_",mod[model],".png"),
+        width=800,height=600,res=115)
+    comp.skyplot(Exp3[seq(model,12,3)],pos[-6500:-6910],
+                 index=div[[pop]],
+                 main=paste(names(div)[pop],mod[model]),
+                 QTLs=pos[QTLs[[QT[pop]]]],xindex=c(-6500:-6910),h=c(120,260),
+                 legend=c("L","Q","K","K+Q"),min=F)
+    dev.off()
+    
+    pvals<-sapply(Exp3[seq(model,12,3)],function(x){
+      y<-x[-6500:-6910,div[[pop]]]
+      y<-sort(as.vector(y))
+      return(y)
+    })
+    png(paste0("Storage/Plots/MultiQTL/QQ",names(div)[pop],"_",mod[model],".png"),
+        width=800,height=800,res=115)
+    comp.QQplot(pvals,main=paste(names(div)[pop],mod[model]),
+                coltype = "divergent",h=c(120,260),
+                legend=c("L","Q","K","K+Q"))
+    dev.off()
+  }
+
+}
+```
+
+In here Exp4 data are processed
+```{r}
+Result<-readRDS("Storage/Exp4_allelism2 .RDS")
+
+names<-c("LB","LQB","MB","MQB","LA","LQA","MA","MQA","LP","LQP","MP","MQP")
+
+
+for(j in 1:3){
+  param<-lapply(Result,function(cross) cross[[j]])
+
+  for(i in 1:4){
+    x<-sapply(param,function(model) model[i])
+    
+    y<-lapply(1:ncol(x[[1]]),function(k){
+        sapply(x,function(type){
+        type[,k]
+      })
+    })
+    
+    if(j==1){
+      y<-lapply(1:24,function(i){
+        new<-matrix(NA,ncol=8,nrow=6910)
+        rownames(new)<-map$marker
+        for(j in 1:8){
+          new[names(y[[i]][[j]]),j]<-y[[i]][[j]]
+        }
+        colnames(new)<-names(y[[i]])
+        return(new)
+      })
+    }
+    
+    names(y)<-colnames(x[[1]])
+    assign(names[i+4*(j-1)],y)
+  }
+}
+
+Exp4<-list(LB,LQB,MB,MQB,LA,LQA,MA,MQA,LP,LQP,MP,MQP)
+rm(LB,LQB,MB,MQB,LA,LQA,MA,MQA,LP,LQP,MP,MQP)
+saveRDS(Exp4,"Storage/Exp4_processed.RDS")
+```
+
+The processed data is then analyzed using a series of plots
+```{r}
+Exp4<-readRDS("Storage/Exp4_processed.RDS")
+names(Exp4)<-names
+dim(Exp4$LB$QTL1h0.2_1)
+
+comp.skyplot(Exp4$LB,pos,index=1:2,min=F)
+
+
+explist<-list(c("LB","LQB","MB","MQB"),
+              c("LA","LQA","MA","MQA"),
+              c("LP","LQP","MP","MQP"))
+name<-c("Biallelic","Ancestral","Parental")
+tit<-paste("QTL",1:2)
+tit<-paste(tit,"h")
+tit<-paste0(tit,rep(c("0.2","0.5","0.8"),each=2))
+tit<-paste(sort(tit),rep(paste("config",1:4),each=6))
+tit<-sort(tit)
+for(j in 1:3){
+  for(i in 1:12){
+  compare<-lapply(Exp4[explist[[j]]],function(model) model[[i]])
+  title<-paste0(name[j],tit[i])
+  title2<-paste(name[j],substr(tit[i],7,19))
+  
+  #Skyline plots
+  if(i<=12){QTL<-1349
+  }else{QTL<-5056}
+   png(paste0("Storage/Plots/Multiallelism/","Skyplot_",title,".png"),
+       width = 800,height=600,res=115)
+  comp.skyplot(compare,pos,QTLs=pos[QTL],
+               main=title2,min = F,legend=c("L","Q","K","Q+K"))
+  dev.off()
+
+  
+  #QQplots
+  pvals<-sapply(compare,function(x){
+    sort(unlist(x),decreasing=T)
+  })
+
+  png(paste0("Storage/Plots/Multiallelism/","QQplot_",title,".png"),
+      height=800,width=800,res=115)
+  comp.QQplot(pvals,main=title2,
+              coltype = "divergent",lim=3)
+  dev.off()
+}
+}
+res<--log10(Exp4$MP$QTL1h0.5_4[,1])
+plot(pos,res)
+abline(v=pos[1349])
+
+
+View(phenotypes)
+View(found_alleles)
+```
+
+The effect of frequencies on the p-values of Exp4 is analyzed, and the distribution of allelic frequencies is also plotted.
+```{r,freq_pvals}
+parents<-link_NAM(crossfounder[i],parental=F)
+freqs<-apply(parents,1,table)
+freqs2<-lapply(freqs,sort,decreasing=T)
+mosaic.list(freqs,h=60,
+            xlab="cM",ylab="Frequencies",main="Unordered Allele Frequency")
+mosaic.list(freqs2,x=pos,xlab="cM",ylab="Frequencies",main="Ordered Allele Frequency")
+
+
+#Correlation test for each model and each phenotype
+Res<-readRDS("Storage/Exp4_allelism2 .RDS")
+var<-apply(parents,1,function(x) var(as.character(x)))#can also be defined without as.character
+Freq.cor<-list()
+for(cross in 1:length(Res)){
+  test<-lapply(Res[[cross]],function(mod){
+    sm<-sapply(mod,function(x){
+      if(is.null(rownames(x))){rownames(x)<-names(var)}
+      var.c<-var[match(names(var),rownames(x))]
+      var.c<-na.omit(var.c)
+      test<-apply(x,2,function(y){
+        t<-cor.test(y,var.c)
+        return(c(test=t$p.value))
+      })
+      return(test)
+    })
+  })
+  
+  Freq.cor[[cross]]<-test
+}
+```
+
+
+

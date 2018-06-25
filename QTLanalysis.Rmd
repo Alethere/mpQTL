@@ -1,0 +1,276 @@
+---
+title: "QTL analysis"
+output: 
+      html_notebook: default
+      html_document: default
+---
+
+##Multiallelism
+In autopolyploids, on top of the complex inheritance, the presence of multiple alleles in a population can complicate QTL detection. Only using SNP information, if there was more than two QTL alleles, we would not be able to model them statistically, and thus would be unable to adequately explain the observed variance. Moreover, in a multiparental population, the chance of dealing with multiple QTL alleles is increased, and considering multiallelism becomes more relevant.  
+In our simulated dataset, each NAM population composed of 9 crosses between two parents from 1 to 10 different ancestral pools. To consider multiallelism let us focus only on the NAM populations from 1 cross (NAM1). Any marker _k_ from a NAM1 population can originate from 40 different parental chromosomes. We will refer to those as _parental alleles_. However, due to the shared ancestry of the parents, two parental chromosomes might have the same _ancestral allele_. These _ancestral alleles_ are the IBD states, the alleles that are the same because of their common original ancestor. In reality, we can expect that QTL regions with the same IBD contribute equally to a phenotype, that is, the allelic effect is determined by the ancestral alleles of an individual.  
+We can assume that SNP dosage models, which work well in diploid populations where SNPs allow to track parental chromosome identity, and each parent is considered homozygous; will not work equally well in polyploid heterozygous situations due to the aforementioned increased diversity. Due to this, it might be relevant to build models capable of representing an increased number of QTL alleles, in order to model the genetic effects of the _ancestral alleles_.  
+
+###Phenotypes
+Such a situation has been taken into account in regards of phenotype simulation. The main objective when generating phenotypes are:
+
+1. To control the effective number of segregating alleles.
+2. To control the heritability $(h^2=\frac{\sigma ^2_A}{\sigma^2_A+\sigma^2_E})$
+  
+As explained in the previous report, the phenotype of each individual can be defined as: $$\begin{equation} 
+y_i=\sum_{j=1}^{k}{\delta_{ij}\alpha_{j}} + \varepsilon_{i} 
+\end{equation}$$
+Where $\delta_{ij}$ is the dosage of individual $i$ at allele $j$, $\alpha_j$ is the genetic effect of allele $j$, and $\varepsilon_{i}$ is the normally distributed random environmental variance. 
+We will simulate the phenotypes using the ancestral alleles scores of the NAM crosses. One key issue when simulating phenotypes at different QTL positions or in different populations, is the variable number of ancestral alleles at each position. For instance:
+```{r,echo=F}
+source("mpQTL_fun.R")
+alleles<-link_NAM(crossfile="PedigreeSIM/NAM_crosses/1_ancestral/cross001_founderalleles.dat",totallele="PedigreeSIM/Parents/Total_pop.txt")
+uniq<-apply(as.matrix(alleles),1,function(x) length(unique(as.integer(x))))
+png("Storage/Plots/Phenotypes/Allele_hist.png",height=600,width = 800,res=115)
+hist(uniq,breaks=seq(5,16,by=1),xlab="Number of alleles",
+     main="Allele number distribution",cex.lab=1.3,cex.main=1.5)
+axis(1,at=min(uniq):max(uniq),labels=min(uniq):max(uniq))
+dev.off()
+```
+To deal with this, an approach is to establish a method to obtain "allelic configurations". We refer with that to the distances and distribution of the different allelic effects. Let us see an example:
+```{r Configurations,echo=T}
+k<-90 #marker number
+QTL<-alleles[90,]
+configs<-7 #number of allelic configurations
+cols<-colorRampPalette(c("blue","green","red"))(configs)
+#We generate a series of exponents c, equal to 2^0, 2^1... until 2^configs
+c<-2^(0:(configs-1))
+effects<-data.frame(x=(length(unique(QTL))-1):0)
+#Afterwards we obtain a series of effects that have a decreasing number of functional alleles, until only one functional allele is left in the last configuration. 
+effects<-sapply(1:length(c),function(i) round(effects$x^c[i]/max(effects$x^c[i]),digits=2))
+
+png("Storage/Plots/Phenotypes/Gen_config.png",height=600,width=800,res=115)
+for( i in 1:ncol(effects)){#for each set of cj, plot them
+  if(i==1){plot(effects[,i],col=cols[i],main="Different types of effects",ylim=c(0,1),type="b",xlab="Allele index",ylab="Genetic effect",
+                cex.lab=1.3,cex.main=1.5)
+  }else{
+      points(effects[,i],col=cols[i],type="b")
+  }
+  axis(1,at=1:nrow(effects),labels=1:nrow(effects))
+}
+dev.off()
+```
+By applying this procedure, a similar structure of the genetic effects can be achieved, even if the number of alleles at the QTL position differs between simulations. To continue, let us discuss the phenotype generation procedure.  
+Because of the type of data that we handle, it will be useful to expect our data as a vector with chromosome alleles in the format `A_1`,`A_2`,`A_3` and `A_4` as the names of each chromosome value for an individual named A. The effects must also be provided, with as many effects as alleles. To continue, the $\alpha$ value defined in the report 3 will be calculated, as it defines the needed proportion to the genetic effects in order to obtain a specific heritability, in case of a fixed environmental variance. Lastly, the phenotypes are computed following the previous equation, with a defined $\mu$ and environmental variance. Additionally, a seed.set procedure has been added to increase repetibility.
+```{r Phenotyper}
+pheno<-function(#obtain a phenotype table with first rows, allele effects, and phenotype for each individual.
+  genotypes, #named vector of genotypes
+  effects, #should be equal to cj*alpha
+  length=3, #all alleles should be equal size
+  Evar=1, #environmental variance to be used
+  mu=50, #the average phenotype
+  h2=0.3, #the heritability to be simulated
+  seed=NULL
+){
+  pattern<-paste0("(.{",length,"})")
+  als<-sapply(genotypes,function(x){
+    x<-gsub(pattern, "\\1 ", x)
+  })
+  
+  #genotypes found in the data. Check that there are as many cjs as genotypes
+  unals<-unique(unlist(strsplit(as.character(als),split = " ")))
+  if(length(unals)!=length(effects)){stop("Number of alleles and effects do not match")}
+  
+  #add as many columns as alleles, count the number of occurences
+  dosages<-sapply(unals,function(x) stringr::str_count(als,x) )
+  rownames(dosages)<-names(als)
+  
+  #calculate the Dosage Sum of Sqares (SSD), and the total
+  dosages<-cbind(dosages,sapply(1:length(unals), function(x){
+    avg<-mean(dosages[,unals[x]])
+    (effects[x]*(dosages[,unals[x]])-avg)^2
+  }))
+  colnames(dosages)<-c(unals,paste("SSD",unals))
+  
+  SST<-rowSums(dosages[,paste("SSD",unals)])^2
+  SST<-sum(SST)
+  alpha<-sqrt(h2*Evar*(nrow(dosages)-1)/((1-h2)*SST)) #the equation
+  
+  phenotype<-sapply(1:length(unals), function(x) dosages[,unals[x]]*effects[x]*alpha)
+  set.seed(seed)
+  phenotype<-rowSums(phenotype)+rnorm(nrow(phenotype),mean=0,sd=Evar)+mu
+  
+  result<-c(round(effects*alpha,digits=4),phenotype)
+  return(result)
+}
+
+tidy_allele<-function(#gets a get_allele_NAM dataframe, turns it into a row(indiv)-column(concatenated alleles) form
+  alleles, #dataframe from get_allele
+  ploidy=4
+){
+  alleles<-t(alleles) #turn into vertical
+    compalleles<-data.frame(ind=NA,allele=NA) #empty df to fill
+    
+    for( i in seq(1,length(alleles),by=ploidy)){ #for each parent (so, take one observation every N rows (where=ploidy ))
+      nal<-paste0(sprintf("%03.f",unlist(alleles[i:(i+ploidy-1),])),collapse="")#concatenate the four rows
+      ind<-substr(names(alleles[i,]),1,nchar(names(alleles[i,]))-2)#get the parent name
+      compalleles<-rbind(compalleles,data.frame(ind=ind,allele=nal))#bind into dataframe
+    }
+    
+    compalleles<-compalleles[-1,]#return everything except the first, empty row
+}
+
+QTL<-tidy_allele(t(alleles[90,]))
+
+for(h2j in c(0.1,0.7,0.99)){
+  phenotypes<-sapply(1:ncol(effects),function(x) 
+    pheno(QTL[,2],effects[,x],h2=h2j,seed=h2j*x,Evar=1,mu=100))
+  phenotypes<-phenotypes[-1:-length(unique(alleles[90,])),]
+  min<-min(phenotypes)
+  max<-max(phenotypes)
+  ind<-nrow(phenotypes)#number of individuals
+  #png(paste0("Storage/Plots/Phenotypes/Multi_",h2j,".png"),height=800,width=800,res=120)
+  for(i in 1:ncol(phenotypes)){
+    if(i==1){plot(rep(i,ind)+rnorm(ind,sd=0.1),phenotypes[,i],
+                  ylim=c(min,max),xlim=c(0,configs+1),
+                  xlab="Configuration",ylab="Phenotypic value",
+                  main=substitute(paste("NAM3 with h"^2,"=",h),list(h=h2j)),col=cols[i],
+                  cex.lab=1.3,cex.main=1.5)
+    }else{
+        points(rep(i,ind)+rnorm(ind,sd=0.1),phenotypes[,i],col=cols[i])
+    }
+    axis(1,at=seq(0,8),labels=0:8)
+  }
+  #dev.off()
+}
+```
+
+As the heritability increases, the difference between the first and last configuration is stronger, due to a decreasing number of non-zero genetic effects. That also causes a drop in the average phenotype: there are more individuals with no active alleles, whose phenotype is just the base phenotype (100). To show that this variation is indeed due to the allelic effect, let us see the plots of the first allele (allele 1), which in any genetic configuration has an effect; the seventh allele (allele 7), which has some decreasing effects until configuration 4; and the last allele (allele 13), which has no effect.
+```{r}
+genotypes<-QTL[,2]
+pattern<-paste0("(.{",3,"})")
+als<-sapply(genotypes,function(x){
+  x<-gsub(pattern, "\\1 ", x)
+})
+
+#genotypes found in the data. Check that there are as many cjs as genotypes
+unals<-unique(unlist(strsplit(as.character(als),split = " ")))
+
+#add as many columns as alleles, count the number of occurences
+dosages<-sapply(unals,function(x) stringr::str_count(als,x) )
+rownames(dosages)<-names(als)
+
+
+n<-ncol(dosages)
+sep<-2
+for( i in c(1,n%/%2,n)){
+  #png(paste0("Storage/Plots/Phenotypes/Allele_",i,".png"),width=800,height=800,res=115)
+  x<-unname(dosages[,i]/max(dosages[,i]))
+  axes<-rep(c(unique(x)),7) 
+  axlab<-axes*max(dosages[,i])
+  if(max(dosages[,i])==4){
+    axlab[axlab%in%2:3]<-NA
+  }
+  axtick<-axes+rep(sep*0:6,each=length(unique(dosages[,i])))
+  for(j in 1:ncol(phenotypes)){
+    x1<-x+sep*(j-1)
+    if(j==1){plot(x1,phenotypes[,j],col=cols[j],main=paste("Allele",i),
+                  xlab="Dosage",ylab="Phenotype",
+                  ylim=c(min(phenotypes),max(phenotypes)),
+                  xlim=c(0,sep*ncol(phenotypes)-1),
+                  axes=F)
+      axis(side=1,tick = T,labels = axlab,at=axtick,line=1,cex=0.5)
+      axis(side=2,tick=T)
+    }else{
+        points(x1,phenotypes[,j],col=cols[j])
+      }
+  }
+  #dev.off()
+}
+```
+We clearly see how the phenotype increases clearly, in any configuration, with a higher dosage of allele 1. Nevertheless, this increase is clearer in the last configurations, as allele 1 becomes the most important allele in determining the phenotype of an individual. With allele 7, only in the first three configurations we appreciate that individuals with dosage 2 of allele 7 do not have very low phenotypes, however, many individuals with dosage 0 of allele 7 have higher phenotypes, indicating that there are more genes alleles at play in this locus. Lastly, with allele 13, which also happens to be uncommon, we see how there is little relationship between the dosage and the rank of the phenotype, due to the fact that, in essence, allele 13 has no impact on phenotype.  
+This set up allows us to analyze a set of situations, although they are, of course, still limited. We will generate QTL analysis using a maximum configuration (where all the alleles have a different effect), two intermediates, and one minimum configuration (where only one allele has an effect). Moreover, three heritabilities will be tested, 0.2, 0.5 and 0.8. Therefore, for each QTL of each NAM cross, we can generate 12 phenotypes. 
+Initially, we would have liked to simulate phenotypes at different QTL positions along the chromosome, to test whether different marker densities along the genome or different positions in a chromosome, have an impact in QTL detection. However, we had to dismiss that idea due to computational limitations. In the end 3 different QTL positions were selected at the following markers: 8, 1349 and 5056. Those correspond to a chromosome edge, a high marker density region and a low marker density region. 
+```{r}
+pops<-c(rep("parent",10),rep(1:9,each=50))
+
+for(i in 1:ncol(effects)){
+  # png(paste0("Storage/Plots/Phenotypes/Box_config",i,".png"),width=800,height=600,res=115)
+  boxplot(as.numeric(phenotypes[-1:-10,i])~pops[-1:-10],col=cols[i],
+          ylim=c(min(as.numeric(phenotypes)),max(as.numeric(phenotypes))),
+          main=paste("Configuration",i),
+          xlab="Cross index",ylab="Phenotype")
+  # dev.off()
+  plot(as.numeric(pops[-1:-10])+rnorm(ind-10,sd=0.1),as.numeric(phenotypes[-1:-10,i]))
+}
+```
+
+```{r}
+files<-paste0("PedigreeSIM/NAM_crosses/",c(3,3,7,10),"_ancestral")
+dosfiles<-paste0(files,"/cross",c(200,201,600,900),"_alleledose.dat")
+files<-paste0(files,"/cross",c(200,201,600,900),"_founderalleles.dat")
+
+NAM<-lapply(files,link_NAM)
+NAM[[1]]<-NAM[[1]][QTLs[[1]],]
+NAM[[2]]<-NAM[[2]][QTLs[[1]],]
+NAM[[3]]<-NAM[[3]][QTLs[[2]],]
+NAM[[4]]<-NAM[[4]][QTLs[[3]],]
+anc_alleles<-sapply(1:10,function(x) 0:39+(x-1)*40)
+
+effects<-lapply(NAM,multi.effects,anc_alleles)
+phenotypes<-lapply(1:length(NAM),function(i){
+  multi.pheno(tidy_allele(NAM[[i]]),effects[[i]],0.9,mu=100,seed=7)
+})
+names(phenotypes)<-paste0("NAM",c(3,3,7,10))
+
+pops<-c(rep(0,10),rep(1:9,each=50))
+ancs<-list(c(rep("parents",10),rep("A0",50*2),rep("A1",50*3),rep("A2",50*4)),
+           c(rep("parents",10),rep("A0",50*2),rep("A1",50*3),rep("A2",50*4)),
+           c(rep("parents",10),rep("A1",50*1),rep("A2",50*2),rep("A3",50*2),
+             rep("A4",50*1),rep("A5",50*2),rep("A6",50*1)),
+           c(rep("parents",10),rep(paste0("A",1:9),each=50)))
+
+xpoint<-lapply(ancs,function(x){
+  n<-length(unique(x)) #number of ancestrals+1
+  idmat<-sapply(unique(x),function(y) x==y)
+  anc<-(idmat%*%c(n,1:(n-1)))
+  m<-sapply(unique(anc),function(i){
+    length(unique(pops[which(anc==i)]))
+  })
+  add<-lapply(m,function(m){
+    seq(-0.5,0.5,length.out=m+2)[-c(1,m+2)]
+  })
+  add<-do.call("c",add)
+  return(anc+add[pops+1])
+  
+})
+
+cols<-lapply(ancs,function(x){
+  n<-length(unique(x)) #number of ancestrals
+  idmat<-sapply(unique(x),function(y) x==y)
+  anc<-(idmat%*%c(n,1:(n-1)))
+  m<-sapply(unique(anc),function(i){
+    length(unique(pops[which(anc==i)]))
+  })
+  col<-colorspace::rainbow_hcl(n)
+  return(col[anc])
+})
+
+
+for(i in 1:length(phenotypes)){
+  png(paste0("Storage/Plots/Phenotypes/",names(phenotypes)[i],"_",i,"_box.png"),
+      height=800,width=800,res=115)
+  boxplot(phenotypes[[i]]~ancs[[i]],
+          main=paste("Ancestral boxplot",names(phenotypes)[i]),cex.axis=0.85,
+          xlab="AG of peripheral",ylab="Phenotype",range=0,
+          col=c(unique(cols[[i]])[-1],unique(cols[[i]])[1]))
+  n<-length(unique(ancs[[i]]))
+  points(xpoint[[i]],phenotypes[[i]],pch=19,cex=0.8,col=cols[[i]])
+  points(xpoint[[i]],phenotypes[[i]],pch=21,cex=1,col="grey3")
+  dev.off()
+}
+
+dosages<-lapply(dosfiles,data.table::fread)
+lapply(dosages,function(x){
+  y<-dist(t(x[,-1]))
+  heatmap(as.matrix(y)[1:10,1:10],Colv=NA,Rowv=NA)
+})
+i<-2
+
+effects[[3]]
+```
+

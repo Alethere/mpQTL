@@ -1,0 +1,99 @@
+---
+title: "MultiQTL heritability bias"
+output: html_notebook
+---
+
+```{r}
+source("mpQTL_fun.R")
+
+crossdosage<-"PedigreeSIM/NAM_crosses/3_ancestral/cross200_alleledose.dat"
+crossfounder<-"PedigreeSIM/NAM_crosses/3_ancestral/cross200_founderalleles.dat"
+gen<-link_NAM(crossfounder)
+
+#define a matrix that identifies each allele with an ancestral population
+anc_alleles<-sapply(1:10,function(x) 0:39+(x-1)*40)
+colnames(anc_alleles)<-paste0("A",0:9)
+#count the number of ancestral populations at each locus of the genome
+n.anc<-sapply(1:nrow(gen),function(k){
+  a<-unique(gen[k,])
+  b<-sapply(a,function(a) colSums(a==anc_alleles) )
+  n.anc<-sum(rowSums(b)!=0)
+  return(n.anc)
+})
+QTL_num<-unique(n.anc)#of course, in our simulated data, the whole genome has the same number of ancestral populations.
+#now we know that we will simulate QTL_num alleles.
+
+#We might want to simulate linked QTLs or unlinked QTLs. In my opinion, for this thesis, unlinked QTLs would be more informative. Although it is interesting, it is out of the scope of this thesis to compare linked and unlinked QTLs, as well as the rest of comparisons.
+map<-data.table::fread("PedigreeSIM/Potato/Potato.map")
+QTLs<-sample.QTL(QTL_num,map,seed=7) #obtain a data.frame with the QTLs to simulate
+gen<-gen[QTLs$index,]
+
+#CHANGE THIS LINE TO CHECK WHAT HAPPENS WITH DIFFERENT EFFECTS. n for number of alleles, size=vector
+#for putting custom genetic effect sizes
+effects<-multi.effects(gen,anc_alleles,n=1)
+gen<-tidy_allele(gen)
+phenotypes<-multi.pheno(gen,effects,0.8,seed=7)
+
+nchar<-3 #number of characters of each allele
+mu<-50
+Evar<-1
+seed<-7
+ pattern<-paste0("(.{",nchar,"})")
+  als<-apply(gen,1,function(x){
+    x<-gsub(pattern, "\\1 ", x)
+  })
+  #alleles found in the data. Check that there are as many effects as alleles
+  unals<-apply(als,2,function(x){
+    unique(unlist(strsplit(as.character(x),split=" ")))
+  })
+  check1<-lapply(1:length(unals),function(i) length(unals[[i]])==length(effects[[i]]))
+  if(!all(unlist(check1))){
+    stop("Effects and number of alleles do not match in at least 1 locus")
+  }
+  
+  #We obtain a dosage list, where each element is one locus
+  dosages<-lapply(1:length(unals),function(x) {
+    a<-sapply(unals[[x]],function(y) stringr::str_count(als[,x],y))
+    rownames(a)<-rownames(als)
+    colnames(a)<-paste(x,colnames(a))
+    return(a)
+  })
+
+  pheno<-lapply(1:length(dosages),function(i){dosages[[i]]%*%effects[[i]]})
+  pheno<-do.call(cbind,pheno)#this has a column for the effect of each locus
+  set.seed(seed)
+  env<-rnorm(nrow(pheno),mean=mu,sd=Evar)
+  Sg<-sum(var(pheno))
+  Se<-var(env)
+  
+  pheno<-lapply(1:length(dosages),function(i){dosages[[i]]%*%effects[[i]]})
+  pheno<-do.call(cbind,pheno)#this has a column for the effect of each locus
+  set.seed(seed)
+  env<-rnorm(nrow(pheno),mean=mu,sd=Evar)
+  Sg<-sum(var(pheno))
+  Se<-var(env)
+
+  
+  ####THIS IS A GOOD EXAMPLE OF THE BIAS
+  a1<-sum(var(pheno)[,1])/(Sg+Se)#real partial herit
+  a2<-var(pheno)[1,1]/(Sg+Se)#observed partial herit
+  
+  b1<-sum(var(pheno)[,2])/(Sg+Se)#real partial herit
+  b2<-var(pheno)[2,2]/(Sg+Se)#observed partial herit
+
+  c1<-sum(var(pheno) [,3])/(Sg+Se)#real partial herit
+  c2<-var(pheno)[3,3]/(Sg+Se)#observed partial herit
+  
+  t1<-Sg/(Sg+Se) #total real heritability
+  t2<-var(pheno)[1,1]/(Sg+Se)+var(pheno)[2,2]/(Sg+Se)+var(pheno)[3,3]/(Sg+Se)#observed total heritability
+  
+  real<-c(a1,b1,c1,t1)
+  obs<-c(a2,b2,c2,t2)
+  bias<-obs-real
+  her<-data.frame(real,obs,bias)
+  rownames(her)<-c("QTL1","QTL2","QTL3","Total")
+  her
+
+```
+
+
